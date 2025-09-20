@@ -254,6 +254,51 @@ class FastPlaid:
         fast_plaid_rust.initialize_torch(
             torch_path=self.torch_path,
         )
+        
+    def load_index(self) -> None:
+        """Load the FastPlaid index into memory."""
+        fast_plaid_rust.initialize_torch(
+            torch_path=self.torch_path,
+        )
+        self._index = fast_plaid_rust.Index.load(
+            index_path=self.index,
+            torch_path=self.torch_path,
+            device=self.devices[0],
+        )
+
+    def search_new(self, queries_embeddings: torch.Tensor | list[torch.Tensor],
+        top_k: int = 10,
+        batch_size: int = 1 << 18,
+        n_full_scores: int = 4096,
+        n_ivf_probe: int = 8,
+        show_progress: bool = True,
+        subset: list[list[int]] | list[int] | None = None):
+        search_params_obj = fast_plaid_rust.SearchParameters(
+            batch_size=batch_size,
+            n_full_scores=n_full_scores,
+            top_k=top_k,
+            n_ivf_probe=n_ivf_probe,
+        )
+
+        if isinstance(queries_embeddings, torch.Tensor):
+            queries_embeddings = [
+                queries_embeddings[i] for i in range(queries_embeddings.shape[0])
+            ]
+
+        scores = self._index.search(
+            queries_embeddings=queries_embeddings,
+            search_parameters=search_params_obj,
+            show_progress=show_progress,
+            subset=subset,
+        )
+
+        return [
+            [
+                (passage_id, score)
+                for score, passage_id in zip(score.scores, score.passage_ids)
+            ]
+            for score in scores
+        ]
 
     def create(  # noqa: PLR0913
         self,

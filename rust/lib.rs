@@ -8,7 +8,7 @@ use anyhow::anyhow;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3_tch::PyTensor;
-use tch::{Device, Kind};
+use tch::{Device, Kind, Tensor};
 
 // Standard library imports.
 use std::ffi::CString;
@@ -22,8 +22,103 @@ use winapi::um::libloaderapi::LoadLibraryA;
 // Internal module imports.
 use crate::index::create::create_index;
 use crate::index::update::update_index;
-use search::load::load_index;
+use search::load::{load_index, LoadedIndex};
 use search::search::{search_index, QueryResult, SearchParameters};
+
+/// Helper function to convert a 3D tensor (batch of queries) into a vector of 2D tensors.
+/// This is useful for converting from the old API format to the new format.
+fn tensor_to_query_list(queries_tensor: &Tensor) -> Vec<Tensor> {
+    let num_queries = queries_tensor.size()[0];
+    let mut query_list = Vec::with_capacity(num_queries as usize);
+    
+    for i in 0..num_queries {
+        query_list.push(queries_tensor.get(i));
+    }
+    
+    query_list
+}
+
+/// A FastPlaid index that can be loaded once and searched multiple times.
+///
+/// This class represents a loaded index and provides methods to search it
+/// efficiently. The index is loaded once and can be searched multiple times
+/// without reloading, making it ideal for serving multiple queries.
+#[pyclass(unsendable)]
+pub struct Index {
+    loaded_index: LoadedIndex,
+    device: Device,
+}
+
+#[pymethods]
+impl Index {
+    /// Creates a new Index by loading from disk.
+    ///
+    /// Args:
+    ///     index_path (str): Path to the directory containing the pre-built index.
+    ///     torch_path (str): Path to the Torch shared library (e.g., `libtorch.so`).
+    ///     device (str): The compute device for the search (e.g., "cpu", "cuda:0").
+    ///
+    /// Returns:
+    ///     Index: A loaded index ready for searching.
+    #[staticmethod]
+    fn load(
+        _py: Python<'_>,
+        index_path: String,
+        torch_path: String,
+        device: String,
+    ) -> PyResult<Self> {
+        call_torch(torch_path)
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to load Torch library: {}", e)))?;
+
+        let device = get_device(&device)?;
+        let loaded_index = load_index(&index_path, device).map_err(anyhow_to_pyerr)?;
+
+        Ok(Index {
+            loaded_index,
+            device,
+        })
+    }
+
+    /// Searches the loaded index with the given query embeddings.
+    ///
+    /// Args:
+    ///     queries_embeddings (list[torch.Tensor]): A list of tensors, where each tensor
+    ///         represents the embeddings for a single query.
+    ///     search_parameters (SearchParameters): A configuration object specifying
+    ///         search behavior, such as `k` and `nprobe`.
+    ///     show_progress (bool): Whether to show a progress bar during search.
+    ///     subset (list[list[int]], optional): A list where each inner list contains
+    ///         the document IDs to restrict the search to for the corresponding query.
+    ///
+    /// Returns:
+    ///     list[QueryResult]: A list of result objects, each containing the
+    ///     `doc_id` and `score` for a retrieved document.
+    fn search(
+        &self,
+        _py: Python<'_>,
+        queries_embeddings: Vec<PyTensor>,
+        search_parameters: &SearchParameters,
+        show_progress: bool,
+        subset: Option<Vec<Vec<i64>>>,
+    ) -> PyResult<Vec<QueryResult>> {
+        let query_tensors: Vec<_> = queries_embeddings
+            .into_iter()
+            .map(|tensor| tensor.to_device(Device::Cpu).to_kind(Kind::Half))
+            .collect();
+
+        let results = search_index(
+            &query_tensors,
+            &self.loaded_index,
+            search_parameters,
+            self.device,
+            show_progress,
+            subset,
+        )
+        .map_err(anyhow_to_pyerr)?;
+
+        Ok(results)
+    }
+}
 
 /// Converts a Rust `anyhow::Error` into a Python-compatible `PyErr`.
 ///
@@ -196,18 +291,40 @@ fn update(
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to update index: {}", e)))
 }
 
+/// Loads an index from disk and returns it for repeated searching.
+///
+/// This function loads an index and returns a handle that can be used
+/// for multiple search operations without reloading the index.
+///
+/// Args:
+///     index_path (str): Path to the directory containing the pre-built index.
+///     torch_path (str): Path to the Torch shared library (e.g., `libtorch.so`).
+///     device (str): The compute device for the search (e.g., "cpu", "cuda:0").
+///
+/// Returns:
+///     Index: A loaded index ready for searching.
+#[pyfunction]
+fn load(
+    _py: Python<'_>,
+    index_path: String,
+    torch_path: String,
+    device: String,
+) -> PyResult<Index> {
+    Index::load(_py, index_path, torch_path, device)
+}
+
 /// Loads an index and performs a search in a single, high-level operation.
 ///
-/// This is the primary entry point for searching. It handles loading the index
-/// from disk, moving it to the specified device, executing the search with the
-/// given queries, and returning the results.
+/// This is a convenience function that combines loading and searching.
+/// For multiple searches on the same index, prefer using the Index class
+/// with separate load() and search() calls.
 ///
 /// Args:
 ///     index (str): Path to the directory containing the pre-built index.
 ///     torch_path (str): Path to the Torch shared library (e.g., `libtorch.so`).
 ///     device (str): The compute device for the search (e.g., "cpu", "cuda:0").
-///     queries_embeddings (torch.Tensor): A 2D tensor of query embeddings with
-///         shape `[num_queries, embedding_dim]`.
+///     queries_embeddings (list[torch.Tensor]): A list of tensors, where each tensor
+///         represents the embeddings for a single query.
 ///     search_parameters (SearchParameters): A configuration object specifying
 ///         search behavior, such as `k` and `nprobe`.
 ///     subset (list[list[int]], optional): A list where each inner list contains
@@ -222,7 +339,7 @@ fn load_and_search(
     index: String,
     torch_path: String,
     device: String,
-    queries_embeddings: PyTensor,
+    queries_embeddings: Vec<PyTensor>,
     search_parameters: &SearchParameters,
     show_progress: bool,
     subset: Option<Vec<Vec<i64>>>,
@@ -230,15 +347,73 @@ fn load_and_search(
     call_torch(torch_path)
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to load Torch library: {}", e)))?;
 
-    let query_tensor = queries_embeddings
-        .to_device(Device::Cpu)
-        .to_kind(Kind::Half);
+    let query_tensors: Vec<_> = queries_embeddings
+        .into_iter()
+        .map(|tensor| tensor.to_device(Device::Cpu).to_kind(Kind::Half))
+        .collect();
 
     let device = get_device(&device)?;
     let loaded_index = load_index(&index, device).map_err(anyhow_to_pyerr)?;
 
     let results = search_index(
-        &query_tensor,
+        &query_tensors,
+        &loaded_index,
+        search_parameters,
+        device,
+        show_progress,
+        subset,
+    )
+    .map_err(anyhow_to_pyerr)?;
+
+    Ok(results)
+}
+
+/// Loads an index and performs a search with a single 3D tensor (backward compatibility).
+///
+/// This function provides backward compatibility for users who have a single 3D tensor
+/// with shape [num_queries, tokens_per_query, dim]. It converts the tensor to the new
+/// format and calls the main search function.
+///
+/// Args:
+///     index (str): Path to the directory containing the pre-built index.
+///     torch_path (str): Path to the Torch shared library (e.g., `libtorch.so`).
+///     device (str): The compute device for the search (e.g., "cpu", "cuda:0").
+///     queries_tensor (torch.Tensor): A 3D tensor of query embeddings with
+///         shape `[num_queries, tokens_per_query, dim]`.
+///     search_parameters (SearchParameters): A configuration object specifying
+///         search behavior, such as `k` and `nprobe`.
+///     subset (list[list[int]], optional): A list where each inner list contains
+///         the document IDs to restrict the search to for the corresponding query.
+///
+/// Returns:
+///     list[QueryResult]: A list of result objects, each containing the
+///     `doc_id` and `score` for a retrieved document.
+#[pyfunction]
+fn load_and_search_tensor(
+    _py: Python<'_>,
+    index: String,
+    torch_path: String,
+    device: String,
+    queries_tensor: PyTensor,
+    search_parameters: &SearchParameters,
+    show_progress: bool,
+    subset: Option<Vec<Vec<i64>>>,
+) -> PyResult<Vec<QueryResult>> {
+    call_torch(torch_path)
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to load Torch library: {}", e)))?;
+
+    let queries_tensor = queries_tensor
+        .to_device(Device::Cpu)
+        .to_kind(Kind::Half);
+    
+    // Convert 3D tensor to vector of 2D tensors
+    let query_tensors = tensor_to_query_list(&queries_tensor);
+
+    let device = get_device(&device)?;
+    let loaded_index = load_index(&index, device).map_err(anyhow_to_pyerr)?;
+
+    let results = search_index(
+        &query_tensors,
         &loaded_index,
         search_parameters,
         device,
@@ -254,20 +429,23 @@ fn load_and_search(
 /// interaction model, implemented in Rust with Python bindings.
 ///
 /// This module provides functions for creating, updating, and searching indexes,
-/// along with the necessary data classes `SearchParameters` and `QueryResult`
-/// to interact with the library from Python.
+/// along with the necessary data classes `SearchParameters`, `QueryResult`, and
+/// `Index` to interact with the library from Python.
 #[pymodule]
 #[pyo3(name = "fast_plaid_rust")]
 fn python_module(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Add data classes required for the Python interface.
     m.add_class::<SearchParameters>()?;
     m.add_class::<QueryResult>()?;
+    m.add_class::<Index>()?;
 
     // Add functions to the Python module.
     m.add_function(wrap_pyfunction!(initialize_torch, m)?)?;
     m.add_function(wrap_pyfunction!(create, m)?)?;
     m.add_function(wrap_pyfunction!(update, m)?)?;
+    m.add_function(wrap_pyfunction!(load, m)?)?;
     m.add_function(wrap_pyfunction!(load_and_search, m)?)?;
+    m.add_function(wrap_pyfunction!(load_and_search_tensor, m)?)?;
 
     Ok(())
 }

@@ -192,15 +192,26 @@ pub fn create_index(
     centroids: Tensor,
     seed: Option<u64>,
 ) -> Result<()> {
+    println!("Starting index creation...");
+    println!("Index path: {}", idx_path);
+    println!("Embedding dimension: {}", embedding_dim);
+    println!("Number of bits for quantization: {}", nbits);
+    println!("Device: {:?}", device);
+
     let _grad_guard = tch::no_grad_guard();
 
     let n_docs = documents_embeddings.len();
     let n_chunks = (n_docs as f64 / 25_000f64.min(1.0 + n_docs as f64)).ceil() as usize;
+    
+    println!("Total documents: {}", n_docs);
+    println!("Processing in {} chunks", n_chunks);
 
     let n_passages = documents_embeddings.len();
 
     let sample_k_float = 16.0 * (120.0 * n_passages as f64).sqrt();
     let k = (1.0 + sample_k_float).min(n_passages as f64) as usize;
+    
+    println!("Sampling {} passages for training from {} total passages", k, n_passages);
 
     let mut rng = if let Some(seed_value) = seed {
         Box::new(StdRng::seed_from_u64(seed_value)) as Box<dyn RngCore>
@@ -226,15 +237,22 @@ pub fn create_index(
     let sample_embs = Tensor::cat(&sample_tensors_vec, 0)
         .to_kind(Kind::Half)
         .to_device(device);
+    
+    println!("Created sample embeddings tensor with shape: {:?}", sample_embs.size());
+    println!("Average document length: {:.2}", avg_doc_len);
 
     let mut est_total_embs_f64 = (n_passages as f64) * avg_doc_len;
     est_total_embs_f64 = (16.0 * est_total_embs_f64.sqrt()).log2().floor();
     let est_total_embs = 2f64.powf(est_total_embs_f64) as i64;
+    
+    println!("Estimated total embeddings: {}", est_total_embs);
 
     let plan_fpath = Path::new(idx_path).join("plan.json");
     let plan_data = json!({ "nbits": nbits, "num_chunks": n_chunks });
     let mut plan_file = File::create(plan_fpath)?;
     writeln!(plan_file, "{}", serde_json::to_string_pretty(&plan_data)?)?;
+    
+    println!("Created plan.json file");
 
     let total_samples = sample_embs.size()[0] as f64;
     let heldout_sz = (0.05 * total_samples).min(50_000f64).round() as i64;
@@ -242,6 +260,9 @@ pub fn create_index(
         sample_embs.split_with_sizes(&[total_samples as i64 - heldout_sz, heldout_sz], 0);
 
     let heldout_samples = sample_splits[1].shallow_clone();
+    
+    println!("Split samples: {} for training, {} held out for calibration", 
+             total_samples as i64 - heldout_sz, heldout_sz);
 
     let initial_codec = ResidualCodec::load(
         nbits,
@@ -251,6 +272,8 @@ pub fn create_index(
         None,
         device,
     )?;
+    
+    println!("Initialized residual codec with {} centroids", initial_codec.centroids.size()[0]);
 
     let heldout_codes = compress_into_codes(&heldout_samples, &initial_codec.centroids);
 
@@ -275,6 +298,9 @@ pub fn create_index(
 
     let b_cutoffs = heldout_res_raw.quantile(&cutoff_quantiles, None, false, "linear");
     let b_weights = heldout_res_raw.quantile(&weight_quantiles, None, false, "linear");
+    
+    println!("Computed quantization buckets: {} cutoffs, {} weights", 
+             b_cutoffs.size()[0], b_weights.size()[0]);
 
     let final_codec = ResidualCodec::load(
         nbits,
@@ -284,6 +310,9 @@ pub fn create_index(
         Some(b_weights.copy()),
         device,
     )?;
+    
+    println!("Created final residual codec");
+    println!("Saving codec components to disk...");
 
     let centroids_fpath = Path::new(idx_path).join("centroids.npy");
     final_codec
@@ -302,12 +331,20 @@ pub fn create_index(
         .avg_residual
         .to_device(Device::Cpu)
         .write_npy(&avg_res_fpath)?;
+    
+    println!("Saved centroids, bucket cutoffs, bucket weights, and average residual");
 
     let proc_chunk_sz = 25_000.min(1 + n_passages);
+    
+    println!("Starting chunk processing with chunk size: {}", proc_chunk_sz);
 
     for chk_idx in 0..n_chunks {
+        println!("Processing chunk {}/{}", chk_idx + 1, n_chunks);
+        
         let chk_offset = chk_idx * proc_chunk_sz;
         let chk_end_offset = (chk_offset + proc_chunk_sz).min(n_passages);
+        
+        println!("  Chunk {} contains passages {}-{}", chk_idx, chk_offset, chk_end_offset - 1);
 
         let chk_embs_vec: Vec<Tensor> = documents_embeddings[chk_offset..chk_end_offset]
             .iter()
@@ -317,9 +354,13 @@ pub fn create_index(
         let chk_embs_tensor = Tensor::cat(&chk_embs_vec, 0)
             .to_kind(Kind::Half)
             .to_device(device);
+        
+        println!("  Chunk {} embeddings tensor shape: {:?}", chk_idx, chk_embs_tensor.size());
 
         let mut chk_codes_list: Vec<Tensor> = Vec::new();
         let mut chk_res_list: Vec<Tensor> = Vec::new();
+        
+        println!("  Compressing embeddings and computing residuals...");
 
         for emb_batch in chk_embs_tensor.split(1 << 18, 0) {
             let code_batch = compress_into_codes(&emb_batch, &final_codec.centroids);
@@ -352,6 +393,9 @@ pub fn create_index(
 
         let chk_codes = Tensor::cat(&chk_codes_list, 0);
         let chk_residuals = Tensor::cat(&chk_res_list, 0);
+        
+        println!("  Chunk {} codes shape: {:?}, residuals shape: {:?}", 
+                 chk_idx, chk_codes.size(), chk_residuals.size());
 
         let chk_codes_fpath = Path::new(idx_path).join(&format!("{}.codes.npy", chk_idx));
         chk_codes
@@ -376,7 +420,12 @@ pub fn create_index(
         let meta_f_w = File::create(chk_meta_fpath)?;
         let buf_writer_meta = BufWriter::new(meta_f_w);
         serde_json::to_writer(buf_writer_meta, &chk_meta)?;
+        
+        println!("  Saved chunk {} files: codes, residuals, doclens, metadata", chk_idx);
     }
+    
+    println!("Finished processing all chunks");
+    println!("Computing embedding offsets and updating metadata...");
 
     let mut current_emb_offset: usize = 0;
     let mut chk_emb_offsets: Vec<usize> = Vec::new();
@@ -415,6 +464,9 @@ pub fn create_index(
 
     let total_num_embs = current_emb_offset;
     let all_codes = Tensor::zeros(&[total_num_embs as i64], (Kind::Int64, device));
+    
+    println!("Total embeddings across all chunks: {}", total_num_embs);
+    println!("Loading all codes into memory for IVF construction...");
 
     for chk_idx in 0..n_chunks {
         let chk_offset_global = chk_emb_offsets[chk_idx];
@@ -424,13 +476,25 @@ pub fn create_index(
         all_codes
             .narrow(0, chk_offset_global as i64, codes_in_chk_count)
             .copy_(&codes_from_file);
+        
+        if chk_idx % 10 == 0 || chk_idx == n_chunks - 1 {
+            println!("  Loaded codes from chunk {}/{}", chk_idx + 1, n_chunks);
+        }
     }
+    
+    println!("Building inverted file index...");
 
     let (sorted_codes, sorted_indices) = all_codes.sort(0, false);
     let code_counts = sorted_codes.bincount::<Tensor>(None, est_total_embs);
+    
+    println!("Sorted all codes and computed counts");
+    println!("Optimizing inverted file index...");
 
     let (opt_ivf, opt_ivf_lens) = optimize_ivf(&sorted_indices, &code_counts, idx_path, device)
         .context("Failed to optimize IVF")?;
+    
+    println!("IVF optimization complete. IVF length: {}, IVF lists: {}", 
+             opt_ivf.size()[0], opt_ivf_lens.size()[0]);
 
     let opt_ivf_fpath = Path::new(idx_path).join("ivf.npy");
     opt_ivf
@@ -441,6 +505,9 @@ pub fn create_index(
     opt_ivf_lens
         .to_device(Device::Cpu)
         .write_npy(&opt_ivf_lens_fpath)?;
+    
+    println!("Saved IVF and IVF lengths to disk");
+    println!("Creating final metadata...");
 
     let final_meta_fpath = Path::new(idx_path).join("metadata.json");
     let final_num_docs = documents_embeddings.len();
@@ -460,6 +527,16 @@ pub fn create_index(
     let final_meta_file = fs::File::create(&final_meta_fpath)?;
     let final_writer = BufWriter::new(final_meta_file);
     serde_json::to_writer_pretty(final_writer, &final_meta_json)?;
+    
+    println!("Final metadata saved");
+    println!("Index creation completed successfully!");
+    println!("Final statistics:");
+    println!("  - Total documents: {}", final_num_docs);
+    println!("  - Total embeddings: {}", total_num_embs);
+    println!("  - Average document length: {:.2}", final_avg_doclen);
+    println!("  - Number of chunks: {}", n_chunks);
+    println!("  - Number of partitions: {}", est_total_embs);
+    println!("  - Quantization bits: {}", nbits);
 
     Ok(())
 }
