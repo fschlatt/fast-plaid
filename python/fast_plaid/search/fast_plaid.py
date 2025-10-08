@@ -80,6 +80,7 @@ def compute_kmeans(  # noqa: PLR0913
         set to True if the device is not "cpu".
 
     """
+    print("Computing K-means centroids...")
     num_passages = len(documents_embeddings)
 
     if n_samples_kmeans is None:
@@ -90,8 +91,10 @@ def compute_kmeans(  # noqa: PLR0913
 
     n_samples_kmeans = min(num_passages, n_samples_kmeans)
 
+    print(f"Using {n_samples_kmeans} samples for K-means.")
+
     sampled_pids = random.sample(
-        population=range(n_samples_kmeans),
+        population=range(num_passages),
         k=n_samples_kmeans,
     )
 
@@ -118,19 +121,24 @@ def compute_kmeans(  # noqa: PLR0913
         use_triton=use_triton_kmeans,
     )
 
+    print(f"Computing {kmeans.k} centroids with {kmeans.niter} iterations...")
+
     kmeans.train(data=tensors.numpy())
+
+    print("Finished computing K-means centroids.")
 
     centroids = torch.from_numpy(
         kmeans.centroids,
     ).to(
         device=device,
-        dtype=torch.float32,
+        dtype=torch.float16,
     )
 
-    return torch.nn.functional.normalize(
-        input=centroids,
-        dim=-1,
-    ).half()
+    # return torch.nn.functional.normalize(
+    #     input=centroids,
+    #     dim=-1,
+    # ).half()
+    return centroids.half()
 
 
 def search_on_device(  # noqa: PLR0913

@@ -88,11 +88,12 @@ pub fn decompress_residuals(
     let output_contributions_sum = reshaped_gathered_weights + reshaped_centroids;
     let decompressed_embeddings = output_contributions_sum.view([num_embeddings, emb_dim]);
 
-    let norms = decompressed_embeddings
-        .norm_scalaropt_dim(2.0, &[-1], true)
-        .clamp_min(1e-12);
+    // let norms = decompressed_embeddings
+    //     .norm_scalaropt_dim(2.0, &[-1], true)
+    //     .clamp_min(1e-12);
         
-    decompressed_embeddings / norms
+    // decompressed_embeddings / norms
+    decompressed_embeddings
 }
 
 /// Represents the results of a single search query.
