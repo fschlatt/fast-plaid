@@ -189,6 +189,7 @@ pub fn create_index(
     idx_path: &str,
     embedding_dim: i64,
     nbits: i64,
+    normalize: bool,
     device: Device,
     centroids: Tensor,
     seed: Option<u64>,
@@ -234,7 +235,7 @@ pub fn create_index(
     let est_total_embs = 2f64.powf(est_total_embs_f64) as i64;
 
     let plan_fpath = Path::new(idx_path).join("plan.json");
-    let plan_data = json!({ "nbits": nbits, "num_chunks": n_chunks });
+    let plan_data = json!({ "nbits": nbits, "num_chunks": n_chunks , "normalize": normalize});
     let mut plan_file = File::create(plan_fpath)?;
     writeln!(plan_file, "{}", serde_json::to_string_pretty(&plan_data)?)?;
 
@@ -464,6 +465,7 @@ pub fn create_index(
         "num_partitions": est_total_embs,
         "num_embeddings": total_num_embs,
         "avg_doclen": final_avg_doclen,
+        "normalize": normalize,
     });
     let final_meta_file = fs::File::create(&final_meta_fpath)?;
     let final_writer = BufWriter::new(final_meta_file);

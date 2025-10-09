@@ -145,6 +145,7 @@ fn create(
     device: String,
     embedding_dim: i64,
     nbits: i64,
+    normalize: bool,
     embeddings: Vec<PyTensor>,
     centroids: PyTensor,
     seed: Option<u64>,
@@ -160,7 +161,7 @@ fn create(
         .map(|tensor| tensor.to_kind(Kind::Half))
         .collect();
 
-    create_index(&embeddings, &index, embedding_dim, nbits, device, centroids, seed)
+    create_index(&embeddings, &index, embedding_dim, nbits, normalize, device, centroids, seed)
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to create index: {}", e)))
 }
 
@@ -318,6 +319,7 @@ impl FastPlaidIndex {
         device: String,
         embedding_dim: i64,
         nbits: i64,
+        normalize: bool,
         embeddings: Vec<PyTensor>,
         centroids: PyTensor,
         seed: Option<u64>,
@@ -334,7 +336,7 @@ impl FastPlaidIndex {
             .collect();
 
         // Create the index
-        create_index(&embeddings, &index_path, embedding_dim, nbits, device, centroids, seed)
+        create_index(&embeddings, &index_path, embedding_dim, nbits, normalize, device, centroids, seed)
             .map_err(|e| PyRuntimeError::new_err(format!("Failed to create index: {}", e)))?;
 
         // Load the newly created index

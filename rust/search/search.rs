@@ -55,6 +55,7 @@ pub fn decompress_residuals(
     centroids: &Tensor,
     emb_dim: i64,
     nbits: i64,
+    normalize: bool,
 ) -> Tensor {
     let num_embeddings = codes.size()[0];
 
@@ -88,11 +89,15 @@ pub fn decompress_residuals(
     let output_contributions_sum = reshaped_gathered_weights + reshaped_centroids;
     let decompressed_embeddings = output_contributions_sum.view([num_embeddings, emb_dim]);
 
-    let norms = decompressed_embeddings
-        .norm_scalaropt_dim(2.0, &[-1], true)
-        .clamp_min(1e-12);
-        
-    decompressed_embeddings / norms
+    
+    if normalize {
+        let norms = decompressed_embeddings
+            .norm_scalaropt_dim(2.0, &[-1], true)
+            .clamp_min(1e-12);
+        decompressed_embeddings / norms
+    } else {
+        decompressed_embeddings
+    }
 }
 
 /// Represents the results of a single search query.
@@ -205,6 +210,7 @@ pub fn search_index(
             params.top_k,
             device,
             subset_tensor.as_ref(),
+            index.normalize,
         )
         .unwrap_or_default();
 
@@ -356,6 +362,7 @@ pub fn search(
     top_k: usize,
     device: Device,
     subset: Option<&Tensor>,
+    normalize: bool,
 ) -> anyhow::Result<(Vec<i64>, Vec<f32>)> {
     let (pids, scores) = tch::no_grad(|| {
         let query_embedding_unsqueezed = query_embedding.unsqueeze(0);
@@ -480,6 +487,7 @@ pub fn search(
             &codec.centroids,
             emb_dim,
             nbits_param,
+            normalize,
         );
 
         let (padded_doc_embs, mask) =

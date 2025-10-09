@@ -4,7 +4,7 @@ import glob
 import math
 import os
 import random
-from typing import Any, Self
+from typing import Any, Literal, Self
 
 import torch
 import torch.multiprocessing as mp
@@ -58,6 +58,8 @@ def compute_kmeans(  # noqa: PLR0913
     seed: int,
     n_samples_kmeans: int | None = None,
     use_triton_kmeans: bool | None = None,
+    normalize: bool = True,
+    kmeans_distance_func: Literal["l2", "cosine", "dot_product"] = "l2",
 ) -> torch.Tensor:
     """Compute K-means centroids for document embeddings."""
     num_passages = len(documents_embeddings)
@@ -75,9 +77,7 @@ def compute_kmeans(  # noqa: PLR0913
         k=n_samples_kmeans,
     )
 
-    samples: list[torch.Tensor] = [
-        documents_embeddings[pid] for pid in set(sampled_pids)
-    ]
+    samples: list[torch.Tensor] = [documents_embeddings[pid] for pid in set(sampled_pids)]
 
     total_tokens = sum([sample.shape[0] for sample in samples])
     num_partitions = (total_tokens / len(samples)) * len(documents_embeddings)
@@ -92,6 +92,7 @@ def compute_kmeans(  # noqa: PLR0913
         k=min(num_partitions, total_tokens),
         niter=kmeans_niters,
         gpu=device != "cpu",
+        distance_func=kmeans_distance_func,
         verbose=False,
         seed=seed,
         max_points_per_centroid=max_points_per_centroid,
@@ -107,10 +108,12 @@ def compute_kmeans(  # noqa: PLR0913
         dtype=torch.float32,
     )
 
-    return torch.nn.functional.normalize(
-        input=centroids,
-        dim=-1,
-    ).half()
+    if normalize:
+        centroids = torch.nn.functional.normalize(
+            input=centroids,
+            dim=-1,
+        )
+    return centroids.half()
 
 
 def search_on_device(  # noqa: PLR0913
@@ -143,13 +146,7 @@ def search_on_device(  # noqa: PLR0913
         subset=subset,
     )
 
-    return [
-        [
-            (passage_id, score)
-            for score, passage_id in zip(score.scores, score.passage_ids)
-        ]
-        for score in scores
-    ]
+    return [[(passage_id, score) for score, passage_id in zip(score.scores, score.passage_ids)] for score in scores]
 
 
 class FastPlaid:
@@ -171,11 +168,7 @@ class FastPlaid:
         device: str | list[str] | None = None,
     ) -> None:
         self.multiple_gpus = False
-        if (
-            isinstance(device, list)
-            and len(device) > 1
-            and torch.cuda.device_count() > 1
-        ):
+        if isinstance(device, list) and len(device) > 1 and torch.cuda.device_count() > 1:
             self.multiple_gpus = True
             if mp.get_start_method(allow_none=True) != "spawn":
                 mp.set_start_method(method="spawn", force=True)
@@ -216,10 +209,12 @@ class FastPlaid:
         kmeans_niters: int = 4,
         max_points_per_centroid: int = 256,
         nbits: int = 4,
+        normalize: bool = True,
         n_samples_kmeans: int | None = None,
         seed: int = 42,
         use_triton_kmeans: bool | None = None,
         metadata: list[dict[str, Any]] | None = None,
+        kmeans_distance_func: Literal["l2", "cosine", "dot_product"] = "l2",
     ) -> "FastPlaid":
         """Create and saves the FastPlaid index.
 
@@ -233,6 +228,8 @@ class FastPlaid:
             The maximum number of points per centroid for K-means.
         nbits:
             Number of bits to use for quantization (default is 4).
+        normalize:
+            Whether to normalize the centroids to unit length.
         n_samples_kmeans:
             Number of samples to use for K-means. If None, it will be calculated based
             on the number of documents.
@@ -243,16 +240,15 @@ class FastPlaid:
             set to True if the device is not "cpu".
         metadata:
             Optional list of dictionaries containing metadata for each document.
+        kmeans_distance_func:
+            Distance function to use for K-means ("l2", "cosine", or "dot").
 
         """
         if isinstance(documents_embeddings, torch.Tensor):
-            documents_embeddings = [
-                documents_embeddings[i] for i in range(documents_embeddings.shape[0])
-            ]
+            documents_embeddings = [documents_embeddings[i] for i in range(documents_embeddings.shape[0])]
 
         documents_embeddings = [
-            embedding.squeeze(0) if embedding.dim() == 3 else embedding
-            for embedding in documents_embeddings
+            embedding.squeeze(0) if embedding.dim() == 3 else embedding for embedding in documents_embeddings
         ]
         num_docs = len(documents_embeddings)
 
@@ -279,6 +275,8 @@ class FastPlaid:
             n_samples_kmeans=n_samples_kmeans,
             seed=seed,
             use_triton_kmeans=use_triton_kmeans,
+            normalize=normalize,
+            kmeans_distance_func=kmeans_distance_func,
         )
         print("Finished computing K-means centroids.")
 
@@ -288,6 +286,7 @@ class FastPlaid:
             device=self.devices[0],
             embedding_dim=dim,
             nbits=nbits,
+            normalize=normalize,
             embeddings=documents_embeddings,
             centroids=centroids,
             seed=seed,
@@ -314,19 +313,14 @@ class FastPlaid:
 
         """
         if isinstance(documents_embeddings, torch.Tensor):
-            documents_embeddings = [
-                documents_embeddings[i] for i in range(documents_embeddings.shape[0])
-            ]
+            documents_embeddings = [documents_embeddings[i] for i in range(documents_embeddings.shape[0])]
 
         documents_embeddings = [
-            embedding.squeeze(0) if embedding.dim() == 3 else embedding
-            for embedding in documents_embeddings
+            embedding.squeeze(0) if embedding.dim() == 3 else embedding for embedding in documents_embeddings
         ]
         num_docs = len(documents_embeddings)
 
-        if not os.path.exists(self.index) or not os.path.exists(
-            os.path.join(self.index, "metadata.json")
-        ):
+        if not os.path.exists(self.index) or not os.path.exists(os.path.join(self.index, "metadata.json")):
             error = f"""
             Index directory '{self.index}' does not exist or is invalid.
             Please create an index first using the .create() method.
@@ -409,10 +403,7 @@ class FastPlaid:
         """
         if isinstance(queries_embeddings, list):
             queries_embeddings = torch.nn.utils.rnn.pad_sequence(
-                sequences=[
-                    embedding[0] if embedding.dim() == 3 else embedding
-                    for embedding in queries_embeddings
-                ],
+                sequences=[embedding[0] if embedding.dim() == 3 else embedding for embedding in queries_embeddings],
                 batch_first=True,
                 padding_value=0.0,
             )
@@ -444,9 +435,7 @@ class FastPlaid:
                 split_size_or_sections=split_size,
             )
 
-            subset_splits: list[list[list[int]] | None] = [None] * len(
-                queries_embeddings_splits
-            )
+            subset_splits: list[list[list[int]] | None] = [None] * len(queries_embeddings_splits)
             if subset is not None:
                 subset_splits = [
                     subset[i * split_size : (i + 1) * split_size]  # type: ignore
@@ -565,12 +554,13 @@ class FastPlaid:
 
         return self
 
+
 class FastPlaidIndex:
     """A Python wrapper for the Rust FastPlaidIndex class.
-    
+
     This class provides a clean Python interface for creating, loading, updating,
     and searching FastPlaid indexes using the underlying Rust implementation.
-    
+
     Args:
     ----
     rust_index:
@@ -579,7 +569,7 @@ class FastPlaidIndex:
         Path to the PyTorch shared library.
     device:
         The device used by the index.
-    
+
     """
 
     def __init__(
@@ -600,11 +590,13 @@ class FastPlaidIndex:
         embedding_dim: int,
         nbits: int = 4,
         device: str | None = None,
+        normalize: bool = True,
         kmeans_niters: int = 4,
         max_points_per_centroid: int = 256,
         n_samples_kmeans: int | None = None,
         seed: int | None = None,
         use_triton_kmeans: bool | None = None,
+        kmeans_distance_func: Literal["l2", "cosine", "dot_product"] = "l2",
     ) -> "FastPlaidIndex":
         """Create a new FastPlaid index.
 
@@ -620,6 +612,8 @@ class FastPlaidIndex:
             Number of bits to use for residual quantization (default is 4).
         device:
             The compute device to use (e.g., "cpu", "cuda:0"). If None, defaults to "cuda" if available.
+        normalize:
+            Whether to normalize the centroids to unit length.
         kmeans_niters:
             Number of iterations for the K-means algorithm.
         max_points_per_centroid:
@@ -630,6 +624,8 @@ class FastPlaidIndex:
             Optional seed for the random number generator.
         use_triton_kmeans:
             Whether to use the Triton-based K-means implementation.
+        kmeans_distance_func:
+            Distance function to use for K-means ("l2", "cosine", or "dot").
 
         Returns:
         -------
@@ -643,14 +639,11 @@ class FastPlaidIndex:
 
         # Convert single tensor to list
         if isinstance(documents_embeddings, torch.Tensor):
-            documents_embeddings = [
-                documents_embeddings[i] for i in range(documents_embeddings.shape[0])
-            ]
+            documents_embeddings = [documents_embeddings[i] for i in range(documents_embeddings.shape[0])]
 
         # Ensure embeddings are properly formatted
         documents_embeddings = [
-            embedding.squeeze(0) if embedding.dim() == 3 else embedding
-            for embedding in documents_embeddings
+            embedding.squeeze(0) if embedding.dim() == 3 else embedding for embedding in documents_embeddings
         ]
 
         # Prepare index directory
@@ -670,6 +663,7 @@ class FastPlaidIndex:
             n_samples_kmeans=n_samples_kmeans,
             seed=seed or 42,
             use_triton_kmeans=use_triton_kmeans,
+            kmeans_distance_func=kmeans_distance_func,
         )
         print("Finished computing K-means centroids.")
 
@@ -680,6 +674,7 @@ class FastPlaidIndex:
             device=device,
             embedding_dim=embedding_dim,
             nbits=nbits,
+            normalize=normalize,
             embeddings=documents_embeddings,
             centroids=centroids,
             seed=seed,
@@ -741,14 +736,11 @@ class FastPlaidIndex:
         """
         # Convert single tensor to list
         if isinstance(documents_embeddings, torch.Tensor):
-            documents_embeddings = [
-                documents_embeddings[i] for i in range(documents_embeddings.shape[0])
-            ]
+            documents_embeddings = [documents_embeddings[i] for i in range(documents_embeddings.shape[0])]
 
         # Ensure embeddings are properly formatted
         documents_embeddings = [
-            embedding.squeeze(0) if embedding.dim() == 3 else embedding
-            for embedding in documents_embeddings
+            embedding.squeeze(0) if embedding.dim() == 3 else embedding for embedding in documents_embeddings
         ]
 
         # Update the Rust index using the instance method (modifies in-place)
@@ -761,8 +753,8 @@ class FastPlaidIndex:
     def delete(self, subset: list[int]) -> Self:
         """Delete documents from the index.
 
-        This method removes specified documents from the index in-place without creating 
-        a new instance. The index is updated both in memory and on disk using the stored 
+        This method removes specified documents from the index in-place without creating
+        a new instance. The index is updated both in memory and on disk using the stored
         index path.
 
         Args:
@@ -831,10 +823,7 @@ class FastPlaidIndex:
             queries_list = queries_embeddings
 
         # Ensure proper formatting
-        queries_list = [
-            query.squeeze(0) if query.dim() == 3 else query
-            for query in queries_list
-        ]
+        queries_list = [query.squeeze(0) if query.dim() == 3 else query for query in queries_list]
 
         num_queries = len(queries_list)
 
@@ -868,11 +857,7 @@ class FastPlaidIndex:
 
         # Convert results to the expected format
         formatted_results = [
-            [
-                (passage_id, score)
-                for passage_id, score in zip(result.passage_ids, result.scores)
-            ]
-            for result in results
+            [(passage_id, score) for passage_id, score in zip(result.passage_ids, result.scores)] for result in results
         ]
 
         return formatted_results
@@ -891,4 +876,3 @@ class FastPlaidIndex:
     def index_path(self) -> str:
         """Get the directory path of the index."""
         return self._rust_index.index_path
-

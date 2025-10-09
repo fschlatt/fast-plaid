@@ -19,6 +19,8 @@ pub struct Metadata {
     pub num_chunks: usize,
     /// The number of bits used for data representation, often for quantization.
     pub nbits: i64,
+    /// A flag indicating whether the data should be normalized during processing.
+    pub normalize: bool,
 }
 
 /// Represents a loaded search index and its associated data tensors.
@@ -36,6 +38,8 @@ pub struct LoadedIndex {
     pub doc_residuals_strided: StridedTensor,
     /// The number of bits used for quantization in the codec.
     pub nbits: i64,
+    /// Whether to normalize embeddings during decompression.
+    pub normalize: bool,
 }
 
 /// Loads an index from a specified directory and prepares it for searching.
@@ -69,6 +73,7 @@ pub fn load_index(index_dir_path_str: &str, device: Device) -> Result<LoadedInde
         .map_err(|e| anyhow!("Failed to parse metadata.json: {}", e))?;
 
     let nbits_metadata: i64 = app_metadata.nbits;
+    let normalize: bool = app_metadata.normalize;
     let num_chunks_metadata: usize = app_metadata.num_chunks;
 
     let centroids_initial_data = Tensor::read_npy(index_dir_path.join("centroids.npy"))?
@@ -172,5 +177,6 @@ pub fn load_index(index_dir_path_str: &str, device: Device) -> Result<LoadedInde
         doc_codes_strided,
         doc_residuals_strided,
         nbits: nbits_metadata,
+        normalize: normalize,
     })
 }
