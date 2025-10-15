@@ -163,17 +163,16 @@ pub fn packbits(res: &Tensor) -> Tensor {
     packed
 }
 
-/// Creates a compressed index from a collection of document embeddings.
+/// Creates a residual codec for vector quantization from a sample of embeddings.
 ///
-/// This function orchestrates the end-to-end process of building a quantized
-/// index. It trains a `ResidualCodec` on a sample of the embeddings,
-/// then processes all embeddings in chunks to generate codes and quantized
-/// residuals. Finally, it builds and optimizes an IVF index from the codes.
+/// This function trains a `ResidualCodec` by sampling embeddings, computing residuals,
+/// and determining quantization buckets through statistical analysis. The codec is then
+/// saved to disk for use during index creation and search operations.
 ///
 /// # Arguments
 ///
 /// * `documents_embeddings` - A vector of tensors, where each tensor represents the embeddings for a single document.
-/// * `idx_path` - The directory path where the generated index files will be stored.
+/// * `idx_path` - The directory path where the codec files will be stored.
 /// * `embedding_dim` - The dimensionality of the embeddings.
 /// * `nbits` - The number of bits to use for residual quantization.
 /// * `device` - The `tch::Device` (e.g., CPU or CUDA) on which to perform computations.
@@ -182,23 +181,18 @@ pub fn packbits(res: &Tensor) -> Tensor {
 ///
 /// # Returns
 ///
-/// A `Result` indicating success or failure. On success, the `idx_path`
-/// directory will contain all the necessary index files.
-pub fn create_index(
+/// A `Result` containing the trained `ResidualCodec` and quantization buckets `(bucket_cutoffs, bucket_weights)`.
+pub fn create_residual_codec(
     documents_embeddings: &Vec<Tensor>,
     idx_path: &str,
     embedding_dim: i64,
     nbits: i64,
-    normalize: bool,
     device: Device,
     centroids: Tensor,
     seed: Option<u64>,
-) -> Result<()> {
+) -> Result<(ResidualCodec, Tensor)> {
     println!("Creating residual codec...");
     let _grad_guard = tch::no_grad_guard();
-
-    let n_docs = documents_embeddings.len();
-    let n_chunks = (n_docs as f64 / 25_000f64.min(1.0 + n_docs as f64)).ceil() as usize;
 
     let n_passages = documents_embeddings.len();
 
@@ -216,11 +210,6 @@ pub fn create_index(
     let sample_pids: Vec<u32> = passage_indices.into_iter().take(k).collect();
 
     let mut sample_tensors_vec: Vec<&Tensor> = Vec::with_capacity(k);
-    let avg_doc_len = documents_embeddings
-        .iter()
-        .map(|t| t.size()[0] as f64)
-        .sum::<f64>()
-        / n_docs as f64;
 
     for &pid in &sample_pids {
         sample_tensors_vec.push(&documents_embeddings[pid as usize]);
@@ -229,15 +218,6 @@ pub fn create_index(
     let sample_embs = Tensor::cat(&sample_tensors_vec, 0)
         .to_kind(Kind::Half)
         .to_device(device);
-
-    let mut est_total_embs_f64 = (n_passages as f64) * avg_doc_len;
-    est_total_embs_f64 = (16.0 * est_total_embs_f64.sqrt()).log2().floor();
-    let est_total_embs = 2f64.powf(est_total_embs_f64) as i64;
-
-    let plan_fpath = Path::new(idx_path).join("plan.json");
-    let plan_data = json!({ "nbits": nbits, "num_chunks": n_chunks , "normalize": normalize});
-    let mut plan_file = File::create(plan_fpath)?;
-    writeln!(plan_file, "{}", serde_json::to_string_pretty(&plan_data)?)?;
 
     let total_samples = sample_embs.size()[0] as f64;
     let heldout_sz = (0.05 * total_samples).min(50_000f64).round() as i64;
@@ -263,31 +243,32 @@ pub fn create_index(
     }
     let heldout_recon_embs = Tensor::cat(&recon_embs_vec, 0);
 
-    let heldout_res_raw = (&heldout_samples - &heldout_recon_embs).to_kind(Kind::Float); // Here float on purpose
+    let heldout_res_raw = (&heldout_samples - &heldout_recon_embs).to_kind(Kind::Float);
     let avg_res_per_dim = heldout_res_raw
         .abs()
-        .mean_dim(Some(&[0i64][..]), false, Kind::Float) // Here float on purpose
+        .mean_dim(Some(&[0i64][..]), false, Kind::Float)
         .to_device(device);
 
     let n_options = 2_i32.pow(nbits as u32);
     let quantiles_base =
-        Tensor::arange_start(0, n_options.into(), (Kind::Float, device)) * (1.0 / n_options as f64); // Here float on purpose
+        Tensor::arange_start(0, n_options.into(), (Kind::Float, device)) * (1.0 / n_options as f64);
 
     let cutoff_quantiles = quantiles_base.narrow(0, 1, n_options as i64 - 1);
     let weight_quantiles = &quantiles_base + (0.5 / n_options as f64);
 
-    let b_cutoffs = heldout_res_raw.quantile(&cutoff_quantiles, None, false, "linear");
-    let b_weights = heldout_res_raw.quantile(&weight_quantiles, None, false, "linear");
+    let bucket_cutoffs = heldout_res_raw.quantile(&cutoff_quantiles, None, false, "linear");
+    let bucket_weights = heldout_res_raw.quantile(&weight_quantiles, None, false, "linear");
 
     let final_codec = ResidualCodec::load(
         nbits,
         initial_codec.centroids.copy(),
         avg_res_per_dim,
-        Some(b_cutoffs.copy()),
-        Some(b_weights.copy()),
+        Some(bucket_cutoffs.copy()),
+        Some(bucket_weights.copy()),
         device,
     )?;
 
+    // Save codec components to disk
     let centroids_fpath = Path::new(idx_path).join("centroids.npy");
     final_codec
         .centroids
@@ -295,10 +276,10 @@ pub fn create_index(
         .write_npy(&centroids_fpath)?;
 
     let cutoffs_fpath = Path::new(idx_path).join("bucket_cutoffs.npy");
-    b_cutoffs.to_device(Device::Cpu).write_npy(&cutoffs_fpath)?;
+    bucket_cutoffs.to_device(Device::Cpu).write_npy(&cutoffs_fpath)?;
 
     let weights_fpath = Path::new(idx_path).join("bucket_weights.npy");
-    b_weights.to_device(Device::Cpu).write_npy(&weights_fpath)?;
+    bucket_weights.to_device(Device::Cpu).write_npy(&weights_fpath)?;
 
     let avg_res_fpath = Path::new(idx_path).join("avg_residual.npy");
     final_codec
@@ -306,7 +287,44 @@ pub fn create_index(
         .to_device(Device::Cpu)
         .write_npy(&avg_res_fpath)?;
 
-    println!("Finished training codec.\nProcessing embeddings in {} chunks...", n_chunks);
+    println!("Finished training codec.");
+
+    Ok((final_codec, bucket_cutoffs))
+}
+
+/// Processes document embeddings in chunks, generating codes and residuals.
+///
+/// This function takes the trained codec and processes all document embeddings
+/// in manageable chunks, generating quantized codes and residuals for each
+/// embedding. The results are saved to disk as separate files for each chunk.
+///
+/// # Arguments
+///
+/// * `documents_embeddings` - A vector of tensors, where each tensor represents the embeddings for a single document.
+/// * `final_codec` - The trained ResidualCodec for quantization.
+/// * `bucket_cutoffs` - Quantization bucket cutoffs for residual compression.
+/// * `idx_path` - The directory path where chunk files will be stored.
+/// * `embedding_dim` - The dimensionality of the embeddings.
+/// * `nbits` - The number of bits to use for residual quantization.
+/// * `device` - The `tch::Device` on which to perform computations.
+/// * `n_chunks` - The number of chunks to process.
+/// * `n_passages` - The total number of passages/documents.
+///
+/// # Returns
+///
+/// A `Result` indicating success or failure of chunk processing.
+pub fn process_embeddings_in_chunks(
+    documents_embeddings: &Vec<Tensor>,
+    final_codec: &ResidualCodec,
+    bucket_cutoffs: &Tensor,
+    idx_path: &str,
+    embedding_dim: i64,
+    nbits: i64,
+    device: Device,
+    n_chunks: usize,
+    n_passages: usize,
+) -> Result<()> {
+    println!("Processing embeddings in {} chunks...", n_chunks);
 
     let proc_chunk_sz = 25_000.min(1 + n_passages);
 
@@ -339,7 +357,7 @@ pub fn create_index(
             let recon_centroids = Tensor::cat(&recon_centroids_batches, 0);
 
             let mut res_batch = &emb_batch - &recon_centroids;
-            res_batch = Tensor::bucketize(&res_batch, &b_cutoffs, true, false);
+            res_batch = Tensor::bucketize(&res_batch, &bucket_cutoffs, true, false);
 
             let mut res_shape = res_batch.size();
             res_shape.push(nbits);
@@ -384,11 +402,38 @@ pub fn create_index(
         serde_json::to_writer(buf_writer_meta, &chk_meta)?;
     }
 
-    println!("Finished processing all chunks.\nBuilding and optimizing IVF...");
+    println!("Finished processing all chunks.");
+    Ok(())
+}
+
+/// Builds and optimizes the Inverted File (IVF) index from processed chunks.
+///
+/// This function consolidates the codes from all processed chunks, builds a sorted
+/// IVF index, optimizes it by removing duplicates, and saves the final index files.
+/// It also updates chunk metadata with embedding offsets for efficient loading.
+///
+/// # Arguments
+///
+/// * `idx_path` - The directory path where index files are stored.
+/// * `device` - The `tch::Device` on which to perform tensor operations.
+/// * `n_chunks` - The number of chunks that were processed.
+/// * `est_total_embs` - Estimated total number of embeddings for bincount operations.
+///
+/// # Returns
+///
+/// A `Result` containing the total number of embeddings processed, or an error if the operation fails.
+pub fn build_and_optimize_ivf(
+    idx_path: &str,
+    device: Device,
+    n_chunks: usize,
+    est_total_embs: i64,
+) -> Result<usize> {
+    println!("Building and optimizing IVF...");
 
     let mut current_emb_offset: usize = 0;
     let mut chk_emb_offsets: Vec<usize> = Vec::new();
 
+    // First pass: update metadata with embedding offsets and collect offset information
     for chk_idx in 0..n_chunks {
         let chk_meta_fpath = Path::new(idx_path).join(format!("{}.metadata.json", chk_idx));
         let meta_f_r = File::open(&chk_meta_fpath)?;
@@ -424,6 +469,7 @@ pub fn create_index(
     let total_num_embs = current_emb_offset;
     let all_codes = Tensor::zeros(&[total_num_embs as i64], (Kind::Int64, device));
 
+    // Second pass: load and concatenate all codes
     for chk_idx in 0..n_chunks {
         let chk_offset_global = chk_emb_offsets[chk_idx];
         let codes_fpath_for_global = Path::new(idx_path).join(format!("{}.codes.npy", chk_idx));
@@ -434,12 +480,14 @@ pub fn create_index(
             .copy_(&codes_from_file);
     }
 
+    // Build and optimize the IVF index
     let (sorted_codes, sorted_indices) = all_codes.sort(0, false);
     let code_counts = sorted_codes.bincount::<Tensor>(None, est_total_embs);
 
     let (opt_ivf, opt_ivf_lens) = optimize_ivf(&sorted_indices, &code_counts, idx_path, device)
         .context("Failed to optimize IVF")?;
 
+    // Save the optimized IVF index to disk
     let opt_ivf_fpath = Path::new(idx_path).join("ivf.npy");
     opt_ivf
         .to_device(Device::Cpu)
@@ -449,8 +497,92 @@ pub fn create_index(
     opt_ivf_lens
         .to_device(Device::Cpu)
         .write_npy(&opt_ivf_lens_fpath)?;
+    
     println!("Finished building and optimizing IVF.");
+    Ok(total_num_embs)
+}
 
+/// Creates a compressed index from a collection of document embeddings.
+///
+/// This function orchestrates the end-to-end process of building a quantized
+/// index. It trains a `ResidualCodec` on a sample of the embeddings,
+/// then processes all embeddings in chunks to generate codes and quantized
+/// residuals. Finally, it builds and optimizes an IVF index from the codes.
+///
+/// # Arguments
+///
+/// * `documents_embeddings` - A vector of tensors, where each tensor represents the embeddings for a single document.
+/// * `idx_path` - The directory path where the generated index files will be stored.
+/// * `embedding_dim` - The dimensionality of the embeddings.
+/// * `nbits` - The number of bits to use for residual quantization.
+/// * `device` - The `tch::Device` (e.g., CPU or CUDA) on which to perform computations.
+/// * `centroids` - The initial centroids for the quantization codec.
+/// * `seed` - An optional seed for the random number generator.
+///
+/// # Returns
+///
+/// A `Result` indicating success or failure. On success, the `idx_path`
+/// directory will contain all the necessary index files.
+pub fn create_index(
+    documents_embeddings: &Vec<Tensor>,
+    idx_path: &str,
+    embedding_dim: i64,
+    nbits: i64,
+    normalize: bool,
+    device: Device,
+    centroids: Tensor,
+    seed: Option<u64>,
+) -> Result<()> {
+    let _grad_guard = tch::no_grad_guard();
+
+    let n_docs = documents_embeddings.len();
+    let n_chunks = (n_docs as f64 / 25_000f64.min(1.0 + n_docs as f64)).ceil() as usize;
+    let n_passages = documents_embeddings.len();
+
+    // Calculate estimated total embeddings for IVF partitioning
+    let avg_doc_len = documents_embeddings
+        .iter()
+        .map(|t| t.size()[0] as f64)
+        .sum::<f64>()
+        / n_docs as f64;
+
+    let mut est_total_embs_f64 = (n_passages as f64) * avg_doc_len;
+    est_total_embs_f64 = (16.0 * est_total_embs_f64.sqrt()).log2().floor();
+    let est_total_embs = 2f64.powf(est_total_embs_f64) as i64;
+
+    let plan_fpath = Path::new(idx_path).join("plan.json");
+    let plan_data = json!({ "nbits": nbits, "num_chunks": n_chunks });
+    let mut plan_file = File::create(plan_fpath)?;
+    writeln!(plan_file, "{}", serde_json::to_string_pretty(&plan_data)?)?;
+
+    // Create and train the residual codec
+    let (final_codec, bucket_cutoffs) = create_residual_codec(
+        documents_embeddings,
+        idx_path,
+        embedding_dim,
+        nbits,
+        device,
+        centroids,
+        seed,
+    )?;
+
+    // Process embeddings in chunks
+    process_embeddings_in_chunks(
+        documents_embeddings,
+        &final_codec,
+        &bucket_cutoffs,
+        idx_path,
+        embedding_dim,
+        nbits,
+        device,
+        n_chunks,
+        n_passages,
+    )?;
+
+    // Build and optimize IVF index
+    let total_num_embs = build_and_optimize_ivf(idx_path, device, n_chunks, est_total_embs)?;
+
+    // Create final metadata
     let final_meta_fpath = Path::new(idx_path).join("metadata.json");
     let final_num_docs = documents_embeddings.len();
     let final_avg_doclen = if final_num_docs > 0 {
@@ -458,7 +590,7 @@ pub fn create_index(
     } else {
         0.0
     };
-
+    
     let final_meta_json = json!({
         "num_chunks": n_chunks,
         "nbits": nbits,
