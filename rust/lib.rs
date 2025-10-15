@@ -154,7 +154,7 @@ fn create(
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to load Torch library: {}", e)))?;
 
     let device = get_device(&device)?;
-    let centroids = centroids.to_device(device).to_kind(Kind::Half);
+    let centroids = centroids.to_kind(Kind::Half);
 
     let embeddings: Vec<_> = embeddings
         .into_iter()
@@ -192,7 +192,7 @@ fn update(
 
     let embeddings: Vec<_> = embeddings
         .into_iter()
-        .map(|tensor| tensor.to_device(device).to_kind(Kind::Half))
+        .map(|tensor| tensor.to_kind(Kind::Half))
         .collect();
 
     update_index(&embeddings, &index, device)
@@ -328,7 +328,7 @@ impl FastPlaidIndex {
             .map_err(|e| PyRuntimeError::new_err(format!("Failed to load Torch library: {}", e)))?;
 
         let device = get_device(&device)?;
-        let centroids = centroids.to_device(device).to_kind(Kind::Half);
+        let centroids = centroids.to_kind(Kind::Half);
 
         let embeddings: Vec<_> = embeddings
             .into_iter()
