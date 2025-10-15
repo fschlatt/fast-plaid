@@ -73,9 +73,10 @@ def main():
     embedding_dim = 128
     tokens_per_doc = 300
 
-    documents_embeddings = [
-        torch.randn(tokens_per_doc, embedding_dim, device="cpu", dtype=torch.float16) for _ in range(num_documents)
-    ]
+    documents_embeddings = torch.randn(
+        num_documents, tokens_per_doc, embedding_dim, device="cpu", dtype=torch.float16
+    ).unbind()
+
     clear_gpu_cache()
 
     index = search.FastPlaidIndex.create("test_index", documents_embeddings, embedding_dim=embedding_dim, device="cuda")
