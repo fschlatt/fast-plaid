@@ -135,9 +135,10 @@ pub fn optimize_ivf(
 /// A 1D tensor of codes (indices of the nearest centroids).
 pub fn compress_into_codes(embs: &Tensor, centroids: &Tensor) -> Tensor {
     let mut codes = Vec::new();
-    let batch_sz = (1 << 29) / centroids.size()[0] as i64;
-    for mut emb_batch in embs.split(batch_sz, 0) {
-        codes.push(centroids.matmul(&emb_batch.t_()).argmax(0, false));
+    for mut emb_batch in embs.split(1 << 12, 0) {
+        for mut centroids_batch in centroids.split(1 << 12, 0) {
+            codes.push(centroids_batch.matmul(&emb_batch.t_()).argmax(0, false));
+        }
     }
     Tensor::cat(&codes, 0)
 }
@@ -238,7 +239,7 @@ pub fn create_residual_codec(
     let heldout_codes = compress_into_codes(&heldout_samples, &initial_codec.centroids);
 
     let mut recon_embs_vec = Vec::new();
-    for code_batch_idxs in heldout_codes.split((1 << 20) as i64, 0) {
+    for code_batch_idxs in heldout_codes.split((1 << 18) as i64, 0) {
         recon_embs_vec.push(initial_codec.centroids.index_select(0, &code_batch_idxs));
     }
     let heldout_recon_embs = Tensor::cat(&recon_embs_vec, 0);
@@ -350,7 +351,7 @@ pub fn process_embeddings_in_chunks(
             chk_codes_list.push(code_batch.shallow_clone());
 
             let mut recon_centroids_batches: Vec<Tensor> = Vec::new();
-            for sub_code_batch in code_batch.split(1 << 20, 0) {
+            for sub_code_batch in code_batch.split(1 << 18, 0) {
                 recon_centroids_batches
                     .push(final_codec.centroids.index_select(0, &sub_code_batch));
             }
