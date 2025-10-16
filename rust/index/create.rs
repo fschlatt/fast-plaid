@@ -345,12 +345,23 @@ pub fn process_embeddings_in_chunks(
             .to_kind(Kind::Half)
             .to_device(device);
 
-        let mut chk_codes_list: Vec<Tensor> = Vec::new();
-        let mut chk_res_list: Vec<Tensor> = Vec::new();
+        let total_embs = chk_embs_tensor.size()[0];
+        
+        // Pre-allocate tensors for codes and residuals
+        let chk_codes = Tensor::empty([total_embs], (Kind::Int64, device));
+        let chk_residuals = Tensor::empty([total_embs, embedding_dim / 8 * nbits], (Kind::Uint8, device));
+        
+        let mut codes_offset = 0i64;
+        let mut residuals_offset = 0i64;
 
         for emb_batch in chk_embs_tensor.split(1 << 18, 0) {
+            let batch_size = emb_batch.size()[0];
             let code_batch = compress_into_codes(&emb_batch, &final_codec.centroids);
-            chk_codes_list.push(code_batch.shallow_clone());
+            
+            // Copy codes directly into pre-allocated tensor
+            chk_codes
+                .narrow(0, codes_offset, batch_size)
+                .copy_(&code_batch);
 
             let mut recon_centroids_batches: Vec<Tensor> = Vec::new();
             for sub_code_batch in code_batch.split(1 << 18, 0) {
@@ -370,15 +381,17 @@ pub fn process_embeddings_in_chunks(
             res_batch = res_batch.bitwise_and_tensor(&ones);
 
             let res_flat = res_batch.flatten(0, -1);
-
             let res_packed = packbits(&res_flat);
-
-            let shape = [res_batch.size()[0], embedding_dim / 8 * nbits];
-            chk_res_list.push(res_packed.reshape(&shape));
+            let res_reshaped = res_packed.reshape(&[batch_size, embedding_dim / 8 * nbits]);
+            
+            // Copy residuals directly into pre-allocated tensor
+            chk_residuals
+                .narrow(0, residuals_offset, batch_size)
+                .copy_(&res_reshaped);
+            
+            codes_offset += batch_size;
+            residuals_offset += batch_size;
         }
-
-        let chk_codes = Tensor::cat(&chk_codes_list, 0);
-        let chk_residuals = Tensor::cat(&chk_res_list, 0);
 
         let chk_codes_fpath = Path::new(idx_path).join(&format!("{}.codes.npy", chk_idx));
         chk_codes
