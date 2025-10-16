@@ -73,7 +73,7 @@ def main():
     embedding_dim = 128
     tokens_per_doc = 300
 
-    documents_embeddings = torch.randn(
+    documents_embeddings = torch.empty(
         num_documents, tokens_per_doc, embedding_dim, device="cpu", dtype=torch.float16
     ).unbind()
 
