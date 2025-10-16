@@ -325,16 +325,15 @@ pub fn process_embeddings_in_chunks(
     nbits: i64,
     device: Device,
     n_chunks: usize,
+    chunk_size: usize,
     n_passages: usize,
 ) -> Result<()> {
     println!("Processing embeddings in {} chunks...", n_chunks);
 
-    let proc_chunk_sz = 25_000.min(1 + n_passages);
-
     let bar = ProgressBar::new(n_chunks.try_into().unwrap());
     for chk_idx in (0..n_chunks).progress_with(bar) {
-        let chk_offset = chk_idx * proc_chunk_sz;
-        let chk_end_offset = (chk_offset + proc_chunk_sz).min(n_passages);
+        let chk_offset = chk_idx * chunk_size;
+        let chk_end_offset = (chk_offset + chunk_size).min(n_passages);
 
         let chk_embs_vec: Vec<Tensor> = documents_embeddings[chk_offset..chk_end_offset]
             .iter()
@@ -545,6 +544,7 @@ pub fn create_index(
     embedding_dim: i64,
     nbits: i64,
     normalize: bool,
+    chunk_size: usize,
     device: Device,
     centroids: Tensor,
     seed: Option<u64>,
@@ -552,7 +552,7 @@ pub fn create_index(
     let _grad_guard = tch::no_grad_guard();
 
     let n_docs = documents_embeddings.len();
-    let n_chunks = (n_docs as f64 / 25_000f64.min(1.0 + n_docs as f64)).ceil() as usize;
+    let n_chunks = (n_docs as f64 / chunk_size as f64).ceil() as usize;
     let n_passages = documents_embeddings.len();
 
     // Calculate estimated total embeddings for IVF partitioning
@@ -592,6 +592,7 @@ pub fn create_index(
         nbits,
         device,
         n_chunks,
+        chunk_size,
         n_passages,
     )?;
 

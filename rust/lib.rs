@@ -132,6 +132,8 @@ fn initialize_torch(_py: Python<'_>, torch_path: String) -> PyResult<()> {
 ///     device (str): The compute device to use for index creation (e.g., "cpu", "cuda:0").
 ///     embedding_dim (int): The dimensionality of the embeddings.
 ///     nbits (int): The number of bits to use for residual quantization.
+///     normalize (bool): Whether to normalize embeddings to unit length.
+///     chunk_size (int): The number of documents to process in each chunk.
 ///     embeddings (list[torch.Tensor]): A list of 2D tensors, where each tensor
 ///         is a batch of document embeddings.
 ///     centroids (torch.Tensor): A 2D tensor of shape `[num_centroids, embedding_dim]`
@@ -146,6 +148,7 @@ fn create(
     embedding_dim: i64,
     nbits: i64,
     normalize: bool,
+    chunk_size: usize,
     embeddings: Vec<PyTensor>,
     centroids: PyTensor,
     seed: Option<u64>,
@@ -161,7 +164,7 @@ fn create(
         .map(|tensor| tensor.to_kind(Kind::Half))
         .collect();
 
-    create_index(&embeddings, &index, embedding_dim, nbits, normalize, device, centroids, seed)
+    create_index(&embeddings, &index, embedding_dim, nbits, normalize, chunk_size, device, centroids, seed)
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to create index: {}", e)))
 }
 
@@ -305,6 +308,8 @@ impl FastPlaidIndex {
     ///     nbits (int): The number of bits to use for residual quantization.
     ///     embeddings (list[torch.Tensor]): A list of 2D tensors, where each tensor
     ///         is a batch of document embeddings.
+    ///     normalize (bool): Whether to normalize embeddings to unit length.
+    ///     chunk_size (int): The number of documents to process in each chunk.
     ///     centroids (torch.Tensor): A 2D tensor of shape `[num_centroids, embedding_dim]`
     ///         used for vector quantization.
     ///     seed (int, optional): Optional seed for the random number generator.
@@ -320,6 +325,7 @@ impl FastPlaidIndex {
         embedding_dim: i64,
         nbits: i64,
         normalize: bool,
+        chunk_size: usize,
         embeddings: Vec<PyTensor>,
         centroids: PyTensor,
         seed: Option<u64>,
@@ -336,7 +342,7 @@ impl FastPlaidIndex {
             .collect();
 
         // Create the index
-        create_index(&embeddings, &index_path, embedding_dim, nbits, normalize, device, centroids, seed)
+        create_index(&embeddings, &index_path, embedding_dim, nbits, normalize, chunk_size, device, centroids, seed)
             .map_err(|e| PyRuntimeError::new_err(format!("Failed to create index: {}", e)))?;
 
         // Load the newly created index

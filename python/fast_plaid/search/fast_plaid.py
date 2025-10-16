@@ -210,6 +210,7 @@ class FastPlaid:
         max_points_per_centroid: int = 256,
         nbits: int = 4,
         normalize: bool = True,
+        chunk_size: int = 25_000,
         n_samples_kmeans: int | None = None,
         seed: int = 42,
         use_triton_kmeans: bool | None = None,
@@ -230,6 +231,8 @@ class FastPlaid:
             Number of bits to use for quantization (default is 4).
         normalize:
             Whether to normalize the centroids to unit length.
+        chunk_size:
+            The number of documents to process in each chunk during index creation.
         n_samples_kmeans:
             Number of samples to use for K-means. If None, it will be calculated based
             on the number of documents.
@@ -287,6 +290,7 @@ class FastPlaid:
             embedding_dim=dim,
             nbits=nbits,
             normalize=normalize,
+            chunk_size=chunk_size,
             embeddings=documents_embeddings,
             centroids=centroids,
             seed=seed,
@@ -591,6 +595,7 @@ class FastPlaidIndex:
         nbits: int = 4,
         device: str | None = None,
         normalize: bool = True,
+        chunk_size: int = 25_000,
         kmeans_niters: int = 4,
         max_points_per_centroid: int = 256,
         n_samples_kmeans: int | None = None,
@@ -614,6 +619,8 @@ class FastPlaidIndex:
             The compute device to use (e.g., "cpu", "cuda:0"). If None, defaults to "cuda" if available.
         normalize:
             Whether to normalize the centroids to unit length.
+        chunk_size:
+            The number of documents to process in each chunk during index creation.
         kmeans_niters:
             Number of iterations for the K-means algorithm.
         max_points_per_centroid:
@@ -675,6 +682,7 @@ class FastPlaidIndex:
             embedding_dim=embedding_dim,
             nbits=nbits,
             normalize=normalize,
+            chunk_size=chunk_size,
             embeddings=documents_embeddings,
             centroids=centroids,
             seed=seed,
