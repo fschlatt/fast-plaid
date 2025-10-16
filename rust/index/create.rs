@@ -134,13 +134,15 @@ pub fn optimize_ivf(
 ///
 /// A 1D tensor of codes (indices of the nearest centroids).
 pub fn compress_into_codes(embs: &Tensor, centroids: &Tensor) -> Tensor {
-    let mut codes = Vec::new();
-    for mut emb_batch in embs.split(1 << 12, 0) {
-        for mut centroids_batch in centroids.split(1 << 12, 0) {
-            codes.push(centroids_batch.matmul(&emb_batch.t_()).argmax(0, false));
-        }
+    let codes = Tensor::empty([embs.size()[0]], (Kind::Int64, embs.device()));
+    let batch_sz = (1 << 29) / centroids.size()[0] as i64;
+    for batch_start in (0..embs.size()[0]).step_by(batch_sz as usize) {
+        let start = batch_start;
+        let length = (embs.size()[0] - batch_start).min(batch_sz);
+        let batch_codes = centroids.matmul(&embs.narrow(0, start, length).t_()).argmax(0, false);
+        codes.narrow(0, start, length).copy_(&batch_codes);
     }
-    Tensor::cat(&codes, 0)
+    codes
 }
 
 /// Packs a tensor of bits (0s or 1s) into a tensor of `Uint8` bytes.
