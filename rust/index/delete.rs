@@ -36,7 +36,7 @@ pub fn delete_from_index(subset: &[i64], idx_path: &str, device: Device) -> Resu
     let main_meta: serde_json::Value = serde_json::from_reader(BufReader::new(main_meta_file))?;
     let num_chunks = main_meta["num_chunks"].as_u64().unwrap() as usize;
     let nbits = main_meta["nbits"].as_i64().unwrap();
-    let est_total_embs = main_meta["num_partitions"].as_i64().unwrap();
+    let n_centroids = main_meta["num_centroids"].as_i64().unwrap();
 
     let ids_to_delete_set: HashSet<i64> = subset.iter().cloned().collect();
     let mut current_doc_offset = 0;
@@ -114,7 +114,7 @@ pub fn delete_from_index(subset: &[i64], idx_path: &str, device: Device) -> Resu
     }
 
     let (sorted_codes, sorted_indices) = all_codes.sort(0, false);
-    let code_counts = sorted_codes.bincount::<Tensor>(None, est_total_embs);
+    let code_counts = sorted_codes.bincount::<Tensor>(None, n_centroids);
     let (opt_ivf, opt_ivf_lens) = optimize_ivf(&sorted_indices, &code_counts, idx_path, device)?;
 
     opt_ivf.write_npy(&idx_path_obj.join("ivf.npy"))?;
@@ -144,7 +144,7 @@ pub fn delete_from_index(subset: &[i64], idx_path: &str, device: Device) -> Resu
     let final_meta_json = json!({
         "num_chunks": num_chunks,
         "nbits": nbits,
-        "num_partitions": est_total_embs,
+        "num_centroids": n_centroids,
         "num_embeddings": total_embs,
         "avg_doclen": final_avg_doclen,
     });
@@ -186,7 +186,7 @@ pub fn delete_from_loaded_index(
     let main_meta: serde_json::Value = serde_json::from_reader(BufReader::new(main_meta_file))?;
     let num_chunks = main_meta["num_chunks"].as_u64().unwrap() as usize;
     let nbits = loaded_index.nbits;
-    let est_total_embs = main_meta["num_partitions"].as_i64().unwrap();
+    let n_centroids = main_meta["num_centroids"].as_i64().unwrap();
 
     let ids_to_delete_set: HashSet<i64> = subset.iter().cloned().collect();
     let mut current_doc_offset = 0;
@@ -265,7 +265,7 @@ pub fn delete_from_loaded_index(
     }
 
     let (sorted_codes, sorted_indices) = all_codes.sort(0, false);
-    let code_counts = sorted_codes.bincount::<Tensor>(None, est_total_embs);
+    let code_counts = sorted_codes.bincount::<Tensor>(None, n_centroids);
     let (opt_ivf, opt_ivf_lens) = optimize_ivf(&sorted_indices, &code_counts, idx_path, device)?;
 
     opt_ivf.to_device(tch::Device::Cpu).write_npy(&idx_path_obj.join("ivf.npy"))?;
@@ -295,7 +295,7 @@ pub fn delete_from_loaded_index(
     let final_meta_json = json!({
         "num_chunks": num_chunks,
         "nbits": nbits,
-        "num_partitions": est_total_embs,
+        "num_centroids": n_centroids,
         "num_embeddings": total_embs,
         "avg_doclen": final_avg_doclen,
     });

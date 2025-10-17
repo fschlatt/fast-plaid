@@ -53,9 +53,9 @@ pub fn update_index(
     let start_chunk_idx = main_meta["num_chunks"]
         .as_u64()
         .context("Missing 'num_chunks' in metadata")? as usize;
-    let est_total_embs = main_meta["num_partitions"]
+    let n_centroids = main_meta["num_centroids"]
         .as_i64()
-        .context("Missing 'num_partitions' in metadata")?;
+        .context("Missing 'num_centroids' in metadata")?;
 
     // Load codec components from the existing index
     let centroids = Tensor::read_npy(&idx_path_obj.join("centroids.npy"))?.to_device(device);
@@ -184,7 +184,7 @@ pub fn update_index(
 
     // Sort all codes and generate the new, combined IVF
     let (sorted_codes, sorted_indices) = all_codes.sort(0, false);
-    let code_counts = sorted_codes.bincount::<Tensor>(None, est_total_embs);
+    let code_counts = sorted_codes.bincount::<Tensor>(None, n_centroids);
 
     let (opt_ivf, opt_ivf_lens) = optimize_ivf(&sorted_indices, &code_counts, idx_path, device)
         .context("Failed to optimize IVF during update")?;
@@ -222,7 +222,7 @@ pub fn update_index(
     let final_meta_json = json!({
         "num_chunks": new_total_chunks,
         "nbits": nbits,
-        "num_partitions": est_total_embs,
+        "num_centroids": n_centroids,
         "num_embeddings": total_num_embs,
         "avg_doclen": final_avg_doclen,
     });
@@ -269,9 +269,9 @@ pub fn update_loaded_index(
     let start_chunk_idx = main_meta["num_chunks"]
         .as_u64()
         .context("Missing 'num_chunks' in metadata")? as usize;
-    let est_total_embs = main_meta["num_partitions"]
+    let n_centroids = main_meta["num_centroids"]
         .as_i64()
-        .context("Missing 'num_partitions' in metadata")?;
+        .context("Missing 'num_centroids' in metadata")?;
 
     // Use the codec from the loaded index
     let codec = &loaded_index.codec;
@@ -393,7 +393,7 @@ pub fn update_loaded_index(
 
     // Sort all codes and generate the new, combined IVF
     let (sorted_codes, sorted_indices) = all_codes.sort(0, false);
-    let code_counts = sorted_codes.bincount::<Tensor>(None, est_total_embs);
+    let code_counts = sorted_codes.bincount::<Tensor>(None, n_centroids);
 
     let (opt_ivf, opt_ivf_lens) = optimize_ivf(&sorted_indices, &code_counts, idx_path, device)
         .context("Failed to optimize IVF during update")?;
@@ -431,7 +431,7 @@ pub fn update_loaded_index(
     let final_meta_json = json!({
         "num_chunks": new_total_chunks,
         "nbits": nbits,
-        "num_partitions": est_total_embs,
+        "num_centroids": n_centroids,
         "num_embeddings": total_num_embs,
         "avg_doclen": final_avg_doclen,
     });

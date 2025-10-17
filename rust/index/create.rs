@@ -432,7 +432,7 @@ pub fn process_embeddings_in_chunks(
 /// * `idx_path` - The directory path where index files are stored.
 /// * `device` - The `tch::Device` on which to perform tensor operations.
 /// * `n_chunks` - The number of chunks that were processed.
-/// * `est_total_embs` - Estimated total number of embeddings for bincount operations.
+/// * `n_centroids` - Number of centroids in the final codebook.
 ///
 /// # Returns
 ///
@@ -441,14 +441,13 @@ pub fn build_and_optimize_ivf(
     idx_path: &str,
     device: Device,
     n_chunks: usize,
-    est_total_embs: i64,
+    n_centroids: i64,
 ) -> Result<usize> {
     println!("Building and optimizing IVF...");
 
     let mut current_emb_offset: usize = 0;
     let mut chk_emb_offsets: Vec<usize> = Vec::new();
 
-    // First pass: update metadata with embedding offsets and collect offset information
     for chk_idx in 0..n_chunks {
         let chk_meta_fpath = Path::new(idx_path).join(format!("{}.metadata.json", chk_idx));
         let meta_f_r = File::open(&chk_meta_fpath)?;
@@ -484,7 +483,6 @@ pub fn build_and_optimize_ivf(
     let total_num_embs = current_emb_offset;
     let all_codes = Tensor::zeros(&[total_num_embs as i64], (Kind::Int64, device));
 
-    // Second pass: load and concatenate all codes
     for chk_idx in 0..n_chunks {
         let chk_offset_global = chk_emb_offsets[chk_idx];
         let codes_fpath_for_global = Path::new(idx_path).join(format!("{}.codes.npy", chk_idx));
@@ -495,14 +493,12 @@ pub fn build_and_optimize_ivf(
             .copy_(&codes_from_file);
     }
 
-    // Build and optimize the IVF index
     let (sorted_codes, sorted_indices) = all_codes.sort(0, false);
-    let code_counts = sorted_codes.bincount::<Tensor>(None, est_total_embs);
+    let code_counts = sorted_codes.bincount::<Tensor>(None, n_centroids);
 
     let (opt_ivf, opt_ivf_lens) = optimize_ivf(&sorted_indices, &code_counts, idx_path, device)
         .context("Failed to optimize IVF")?;
 
-    // Save the optimized IVF index to disk
     let opt_ivf_fpath = Path::new(idx_path).join("ivf.npy");
     opt_ivf
         .to_device(Device::Cpu)
@@ -554,17 +550,7 @@ pub fn create_index(
     let n_docs = documents_embeddings.len();
     let n_chunks = (n_docs as f64 / chunk_size as f64).ceil() as usize;
     let n_passages = documents_embeddings.len();
-
-    // Calculate estimated total embeddings for IVF partitioning
-    let avg_doc_len = documents_embeddings
-        .iter()
-        .map(|t| t.size()[0] as f64)
-        .sum::<f64>()
-        / n_docs as f64;
-
-    let mut est_total_embs_f64 = (n_passages as f64) * avg_doc_len;
-    est_total_embs_f64 = (16.0 * est_total_embs_f64.sqrt()).log2().floor();
-    let est_total_embs = 2f64.powf(est_total_embs_f64) as i64;
+    let n_centroids = centroids.size()[0];
 
     let plan_fpath = Path::new(idx_path).join("plan.json");
     let plan_data = json!({ "nbits": nbits, "num_chunks": n_chunks });
@@ -597,7 +583,7 @@ pub fn create_index(
     )?;
 
     // Build and optimize IVF index
-    let total_num_embs = build_and_optimize_ivf(idx_path, device, n_chunks, est_total_embs)?;
+    let total_num_embs = build_and_optimize_ivf(idx_path, device, n_chunks, n_centroids)?;
 
     // Create final metadata
     let final_meta_fpath = Path::new(idx_path).join("metadata.json");
@@ -611,7 +597,7 @@ pub fn create_index(
     let final_meta_json = json!({
         "num_chunks": n_chunks,
         "nbits": nbits,
-        "num_partitions": est_total_embs,
+        "num_centroids": n_centroids,
         "num_embeddings": total_num_embs,
         "avg_doclen": final_avg_doclen,
         "normalize": normalize,

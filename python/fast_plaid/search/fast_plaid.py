@@ -80,8 +80,8 @@ def compute_kmeans(  # noqa: PLR0913
     samples: list[torch.Tensor] = [documents_embeddings[pid] for pid in set(sampled_pids)]
 
     total_tokens = sum([sample.shape[0] for sample in samples])
-    num_partitions = (total_tokens / len(samples)) * len(documents_embeddings)
-    num_partitions = int(2 ** math.floor(math.log2(16 * math.sqrt(num_partitions))))
+    num_centroids = (total_tokens / len(samples)) * len(documents_embeddings)
+    num_centroids = int(2 ** math.floor(math.log2(16 * math.sqrt(num_centroids))))
 
     tensors = torch.cat(tensors=samples)
     if tensors.is_cuda:
@@ -89,7 +89,7 @@ def compute_kmeans(  # noqa: PLR0913
 
     kmeans = FastKMeans(
         d=dim,
-        k=min(num_partitions, total_tokens),
+        k=min(num_centroids, total_tokens),
         niter=kmeans_niters,
         gpu=device != "cpu",
         distance_func=kmeans_distance_func,
