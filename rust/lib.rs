@@ -329,7 +329,7 @@ impl FastPlaidIndex {
         embeddings: Vec<PyTensor>,
         centroids: PyTensor,
         seed: Option<u64>,
-    ) -> PyResult<Self> {
+    ) -> PyResult<()> {
         call_torch(torch_path.clone())
             .map_err(|e| PyRuntimeError::new_err(format!("Failed to load Torch library: {}", e)))?;
 
@@ -345,14 +345,7 @@ impl FastPlaidIndex {
         create_index(&embeddings, &index_path, embedding_dim, nbits, normalize, chunk_size, device, centroids, seed)
             .map_err(|e| PyRuntimeError::new_err(format!("Failed to create index: {}", e)))?;
 
-        // Load the newly created index
-        let loaded_index = load_index(&index_path, device).map_err(anyhow_to_pyerr)?;
-
-        Ok(FastPlaidIndex {
-            loaded_index,
-            device,
-            index_path,
-        })
+        Ok(())
     }
 
     /// Creates a new FastPlaidIndex by loading from disk.

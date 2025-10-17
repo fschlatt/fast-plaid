@@ -586,9 +586,8 @@ class FastPlaidIndex:
         self._torch_path = torch_path
         self._device = device
 
-    @classmethod
+    @staticmethod
     def create(  # noqa: PLR0913
-        cls,
         index_path: str,
         documents_embeddings: list[torch.Tensor] | torch.Tensor,
         embedding_dim: int,
@@ -602,7 +601,7 @@ class FastPlaidIndex:
         seed: int | None = None,
         use_triton_kmeans: bool | None = None,
         kmeans_distance_func: Literal["l2", "cosine", "dot_product"] = "l2",
-    ) -> "FastPlaidIndex":
+    ) -> None:
         """Create a new FastPlaid index.
 
         Args:
@@ -675,7 +674,7 @@ class FastPlaidIndex:
         print("Finished computing K-means centroids.")
 
         # Create the Rust index
-        rust_index = fast_plaid_rust.FastPlaidIndex.create(
+        fast_plaid_rust.FastPlaidIndex.create(
             index_path=index_path,
             torch_path=torch_path,
             device=device,
@@ -687,8 +686,6 @@ class FastPlaidIndex:
             centroids=centroids,
             seed=seed,
         )
-
-        return cls(rust_index=rust_index, torch_path=torch_path, device=device)
 
     @classmethod
     def load(
