@@ -59,6 +59,7 @@ def main():
     parser = ArgumentParser()
 
     parser.add_argument("--num_documents", type=int, default=500, help="Number of documents to create")
+    parser.add_argument("--chunk_size", type=int, default=25_000, help="Chunk size for processing documents")
 
     args = parser.parse_args()
 
@@ -79,7 +80,9 @@ def main():
 
     clear_gpu_cache()
 
-    index = search.FastPlaidIndex.create("test_index", documents_embeddings, embedding_dim=embedding_dim, device="cuda")
+    search.FastPlaidIndex.create(
+        "test_index", documents_embeddings, embedding_dim=embedding_dim, device="cuda", chunk_size=args.chunk_size
+    )
 
     print_memory_stats("After Index Creation")
 
